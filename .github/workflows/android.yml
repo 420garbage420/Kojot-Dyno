@@ -1,0 +1,132 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Assemble ${{ github.event.inputs.build_type || 'debug' }} APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses >/dev/null || true
+
+      - name: Install SDK packages
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      # Optional: if you store a prebuilt server binary as a release asset or secret path,
+      # uncomment and point this at it. Without it the APK still builds; inference will
+      # report BINARY_MISSING at runtime until you sideload the .so.
+      # - name: Fetch libllama_server.so
+      #   run: |
+      #     mkdir -p app/src/main/jniLibs/arm64-v8a
+      #     curl -fsSL -o app/src/main/jniLibs/arm64-v8a/libllama_server.so \
+      #       "${{ secrets.LLAMA_SERVER_SO_URL }}"
+
+      - name: Grant execute on gradlew
+        run: chmod +x gradlew
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build debug APK
+        if: ${{ (github.event.inputs.build_type || 'debug') == 'debug' }}
+        run: ./gradlew :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Build release APK (unsigned)
+        if: ${{ github.event.inputs.build_type == 'release' }}
+        run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Upload debug APK
+        if: ${{ (github.event.inputs.build_type || 'debug') == 'debug' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kojot-dyno-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release APK
+        if: ${{ github.event.inputs.build_type == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kojot-dyno-release-unsigned
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  # Optional signed release when secrets are configured
+  signed-release:
+    name: Signed release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release' && vars.ENABLE_SIGNED_RELEASE == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - run: yes | sdkmanager --licenses >/dev/null || true
+      - run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+      - run: chmod +x gradlew
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > app/keystore.jks
+      - name: Assemble signed release
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon \
+            -Pandroid.injected.signing.store.file=$PWD/app/keystore.jks \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kojot-dyno-release-signed
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
