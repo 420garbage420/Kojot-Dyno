@@ -5,6 +5,7 @@ import android.os.Looper
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -29,6 +30,7 @@ class NativeBridge(
     private val scope: CoroutineScope,
     private val webViewProvider: () -> WebView?,
     private val onNotificationText: (String) -> Unit = {},
+    private val activityProvider: () -> MainActivity? = { null },
 ) {
     private val main = Handler(Looper.getMainLooper())
     private var eventsBound = false
@@ -54,10 +56,70 @@ class NativeBridge(
     @JavascriptInterface
     fun listModels(dir: String): String {
         return scope.launchBlocking {
-            val arr = JSONArray()
-            engine.listModels(dir).forEach { arr.put(it) }
-            arr.toString()
+            val act = activityProvider()
+            val hasAccess = act?.hasAllFilesAccess() ?: true
+            if (!hasAccess) {
+                // Kick the settings screen; JS shows the message
+                main.post { act?.ensureAllFilesAccess() }
+                return@launchBlocking JSONObject()
+                    .put("ok", false)
+                    .put("error", "ALL_FILES_REQUIRED")
+                    .put("message", "Android blocked access to shared storage. Enable “All files access” for Kojot Dyno, then tap Scan again.")
+                    .put("models", JSONArray())
+                    .toString()
+            }
+            val roots = linkedSetOf<String>()
+            if (dir.isNotBlank()) roots += dir.trim()
+            // Common lab locations
+            roots += "/storage/emulated/0/Download/Local_Models"
+            roots += "/storage/emulated/0/Download"
+            roots += "/sdcard/Download/Local_Models"
+            roots += "/sdcard/Download"
+            try {
+                act?.getExternalFilesDir(null)?.let { roots += File(it, "models").absolutePath }
+                act?.getExternalFilesDir(null)?.absolutePath?.let { roots += it }
+            } catch (_: Throwable) {}
+
+            val seen = HashSet<String>()
+            val models = JSONArray()
+            val scanned = JSONArray()
+            for (root in roots) {
+                scanned.put(root)
+                for (m in engine.listModels(root)) {
+                    val path = m.optString("path")
+                    if (path.isNotEmpty() && seen.add(path)) models.put(m)
+                }
+            }
+            JSONObject()
+                .put("ok", true)
+                .put("models", models)
+                .put("scanned", scanned)
+                .put("count", models.length())
+                .toString()
         }
+    }
+
+    @JavascriptInterface
+    fun requestStorageAccess(): String {
+        val act = activityProvider()
+        return if (act == null) {
+            JSONObject().put("ok", false).put("error", "NO_ACTIVITY").toString()
+        } else {
+            val granted = act.hasAllFilesAccess()
+            if (!granted) main.post { act.ensureAllFilesAccess() }
+            JSONObject().put("ok", granted).put("hasAccess", granted).toString()
+        }
+    }
+
+    @JavascriptInterface
+    fun defaultModelDirs(): String {
+        val arr = JSONArray()
+        arr.put("/storage/emulated/0/Download/Local_Models")
+        arr.put("/storage/emulated/0/Download")
+        activityProvider()?.getExternalFilesDir(null)?.let {
+            arr.put(File(it, "models").absolutePath)
+        }
+        return arr.toString()
     }
 
     @JavascriptInterface

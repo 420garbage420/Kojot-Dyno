@@ -368,27 +368,36 @@ class DynoEngine(
 
     suspend fun listModels(dir: String): List<JSONObject> = withContext(Dispatchers.IO) {
         val root = File(dir)
-        if (!root.isDirectory) return@withContext emptyList()
-        root.listFiles { f -> f.isFile && f.name.endsWith(".gguf", ignoreCase = true) }
-            ?.sortedBy { it.name.lowercase() }
-            ?.map { f ->
-                val info = runCatching { GgufMeta.read(f) }.getOrNull()
-                JSONObject().apply {
-                    put("path", f.absolutePath)
-                    put("name", f.name)
-                    put("sizeBytes", f.length())
-                    put("mtimeMs", f.lastModified())
-                    if (info != null) {
-                        put("architecture", info.architecture)
-                        put("family", info.modelFamily)
-                        put("paramSizeB", info.paramSizeB)
-                        put("quant", info.quantType)
-                        put("nCtxTrain", info.ctxTrain)
-                        put("nLayer", info.nLayer)
-                        put("nEmbd", info.nEmbd)
-                    }
+        if (!root.exists() || !root.isDirectory) return@withContext emptyList()
+        val files = ArrayList<File>()
+        // Direct children
+        root.listFiles()?.forEach { f ->
+            if (f.isFile && f.name.endsWith(".gguf", ignoreCase = true)) files += f
+            // One level of subdirs (e.g. Download/Local_Models/qwen/*.gguf)
+            if (f.isDirectory) {
+                f.listFiles()?.forEach { c ->
+                    if (c.isFile && c.name.endsWith(".gguf", ignoreCase = true)) files += c
                 }
-            } ?: emptyList()
+            }
+        }
+        files.sortedBy { it.name.lowercase() }.map { f ->
+            val info = runCatching { GgufMeta.read(f) }.getOrNull()
+            JSONObject().apply {
+                put("path", f.absolutePath)
+                put("name", f.name)
+                put("sizeBytes", f.length())
+                put("mtimeMs", f.lastModified())
+                if (info != null) {
+                    put("architecture", info.architecture)
+                    put("family", info.modelFamily)
+                    put("paramSizeB", info.paramSizeB)
+                    put("quant", info.quantType)
+                    put("nCtxTrain", info.ctxTrain)
+                    put("nLayer", info.nLayer)
+                    put("nEmbd", info.nEmbd)
+                }
+            }
+        }
     }
 
     suspend fun query(sql: String, args: Array<String>? = null): List<JSONObject> =

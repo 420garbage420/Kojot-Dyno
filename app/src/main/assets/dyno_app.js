@@ -154,17 +154,37 @@
 
   // ---- UI actions ----
   $("btn-scan").addEventListener("click", () => {
-    if (!native()) return alert("Native bridge not available");
+    if (!native()) {
+      $("model-meta").textContent = "Native bridge not available — is the Dyno service running?";
+      return alert("Native bridge not available");
+    }
     const dir = $("model-dir").value;
     let raw;
-    try { raw = native().listModels(dir); } catch (e) { return alert(e); }
-    const list = JSON.parse(raw);
+    try { raw = native().listModels(dir); } catch (e) { return alert(String(e)); }
+    let payload;
+    try { payload = JSON.parse(raw); } catch (e) { return alert("Bad scan response: " + raw); }
+
+    // New shape: { ok, models, error?, message?, scanned? }
+    // Legacy: bare array
+    const list = Array.isArray(payload) ? payload : (payload.models || []);
     const sel = $("model-list");
     sel.innerHTML = "";
+    currentModel = null;
+
+    if (!Array.isArray(payload) && payload.ok === false) {
+      $("model-meta").textContent = payload.message || payload.error || "Scan failed";
+      if (payload.error === "ALL_FILES_REQUIRED" && native().requestStorageAccess) {
+        try { native().requestStorageAccess(); } catch (_) {}
+      }
+      appendLog($("engine-log"), "scan: " + (payload.message || payload.error));
+      return;
+    }
+
     list.forEach((m, i) => {
       const opt = document.createElement("option");
       opt.value = i;
-      opt.textContent = `${m.name}  (${(m.sizeBytes / 1e9).toFixed(2)} GB${m.quant ? ", " + m.quant : ""})`;
+      const gb = m.sizeBytes != null ? (m.sizeBytes / 1e9).toFixed(2) + " GB" : "?";
+      opt.textContent = `${m.name}  (${gb}${m.quant ? ", " + m.quant : ""})`;
       opt._meta = m;
       sel.appendChild(opt);
     });
@@ -172,6 +192,14 @@
       sel.selectedIndex = 0;
       currentModel = list[0];
       showMeta(currentModel);
+      appendLog($("engine-log"), "scan: " + list.length + " model(s)");
+    } else {
+      const scanned = (!Array.isArray(payload) && payload.scanned)
+        ? payload.scanned.join(", ")
+        : dir;
+      $("model-meta").textContent =
+        "No .gguf found. Put models in Download/Local_Models (or Download), grant All files access, then Scan again. Looked in: " + scanned;
+      appendLog($("engine-log"), "scan: 0 models in " + scanned);
     }
   });
 
@@ -378,7 +406,14 @@
     if (native()) {
       try { $("btn-scan").click(); } catch (_) {}
     } else {
-      appendLog($("engine-log"), "Native bridge missing — open inside the Dyno WebView.");
+      appendLog($("engine-log"), "Native bridge missing — waiting for Dyno service…");
+      // retry a few times while the service binds
+      let tries = 0;
+      const t = setInterval(() => {
+        tries++;
+        if (native()) { clearInterval(t); try { $("btn-scan").click(); } catch (_) {} }
+        else if (tries > 20) { clearInterval(t); appendLog($("engine-log"), "Bridge never appeared."); }
+      }, 500);
     }
-  }, 300);
+  }, 400);
 })();
