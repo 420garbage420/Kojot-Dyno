@@ -1,6 +1,7 @@
 package com.kojot.dyno
 
 import android.content.Context
+import android.os.Build
 import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
@@ -113,7 +114,7 @@ class LlamaServerProcess(private val ctx: Context, private val scope: CoroutineS
             return@withContext StartResult.Failed("EXEC_FAILED", e.message, null, "")
         }
         process = p
-        val childPid = p.pid()
+        val childPid = processPid(p)
         pid = childPid
         startedAtElapsed = SystemClock.elapsedRealtime()
         try { pidFile.writeText(childPid.toString()) } catch (_: IOException) {}
@@ -186,10 +187,10 @@ class LlamaServerProcess(private val ctx: Context, private val scope: CoroutineS
         if (p != null && p.isAlive) {
             _state.value = State.STOPPING
             expectedStop = true
-            signal(p.pid(), OsConstants.SIGTERM)
+            signal(processPid(p), OsConstants.SIGTERM)
             if (!p.waitFor(graceMs, TimeUnit.MILLISECONDS)) {
                 escalated = true
-                signal(p.pid(), OsConstants.SIGKILL)
+                signal(processPid(p), OsConstants.SIGKILL)
                 p.waitFor(3, TimeUnit.SECONDS)
             }
             waitForState(State.STOPPED, 2_000)
@@ -205,7 +206,7 @@ class LlamaServerProcess(private val ctx: Context, private val scope: CoroutineS
     /** Non-suspending SIGKILL for onDestroy and watchdog paths. Marks the exit as deliberate. */
     fun killNow() {
         expectedStop = true
-        process?.let { signal(it.pid(), OsConstants.SIGKILL) }
+        process?.let { signal(processPid(it), OsConstants.SIGKILL) }
     }
 
     // ---- orphans ---------------------------------------------------------------------------------
@@ -287,6 +288,39 @@ class LlamaServerProcess(private val ctx: Context, private val scope: CoroutineS
             delay(100)
         }
         return portFree(p)
+    }
+
+    
+    /**
+     * Resolve the native OS pid of a [Process].
+     * [Process.pid] is API 31+ in the Android SDK stubs; we always use reflection so this
+     * compiles against any compileSdk and runs on minSdk 28+.
+     */
+    @Suppress("DiscouragedPrivateApi")
+    private fun processPid(p: Process): Int {
+        // API 31+: public long pid()
+        if (Build.VERSION.SDK_INT >= 31) {
+            try {
+                val m = Process::class.java.getMethod("pid")
+                val v = m.invoke(p)
+                when (v) {
+                    is Int -> return v
+                    is Long -> return v.toInt()
+                }
+            } catch (_: Throwable) { /* fall through */ }
+        }
+        // Hidden field on Android's ProcessImpl / older UNIXProcess
+        var cls: Class<*>? = p.javaClass
+        while (cls != null) {
+            try {
+                val f = cls.getDeclaredField("pid")
+                f.isAccessible = true
+                return f.getInt(p)
+            } catch (_: Throwable) {
+                cls = cls.superclass
+            }
+        }
+        return -1
     }
 
     private fun signal(pid: Int, sig: Int) {
